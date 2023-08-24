@@ -1,6 +1,7 @@
-# -*- coding: utf-8 -*-
+   # -*- coding: utf-8 -*-
 import numpy as np, torch, torch.nn as nn
 from datetime import datetime
+from torcheval.metrics.functional import r2_score
 
 class CustomDataset(torch.utils.data.Dataset):
   def __init__(self, X, y):
@@ -28,7 +29,14 @@ def init_weights(layer):
     # torch.nn.init.normal_(layer.weight, mean = 0, std = 0.001)
     torch.nn.init.zeros_(layer.bias)
 
-def train(train_loader, loss_function, model, optimizer, grad_clipping, max_norm, device, scheduler):
+def train(train_loader, 
+          loss_function, 
+          model, optimizer, 
+          grad_clipping, 
+          max_norm, 
+          device, 
+          scheduler, 
+          scoring='r2'):
 
   # Training Loop 
 
@@ -36,12 +44,22 @@ def train(train_loader, loss_function, model, optimizer, grad_clipping, max_norm
   # these counts will be updated every epoch
 
   # Initialize train_loss at the he start of the epoch
-  running_train_loss = 0
-  running_train_correct = 0
+  if scoring == 'r2':
+      preds = torch.Tensor() 
+      preds = preds.to(device)
+      y_true = torch.Tensor()
+      y_true = y_true.to(device)
+  else:
+      running_train_loss = 0
+      running_train_tp = 0
+      running_train_tn = 0
+      running_train_fp = 0
+      running_train_fn = 0
   
   # put the model in training mode
 
   model.train()
+  
   # Iterate on batches from the dataset using train_loader
   for input_, targets in train_loader:
     
@@ -57,10 +75,7 @@ def train(train_loader, loss_function, model, optimizer, grad_clipping, max_norm
     targets = targets.long()
     loss = loss_function(output, targets)
 
-    # Correct prediction
-    y_pred = torch.argmax(output, dim = 1)
-    correct = torch.sum(y_pred == targets)
-
+    
     # Step 3: Backward pass -Compute the gradients
     optimizer.zero_grad()
     loss.backward()
@@ -74,35 +89,69 @@ def train(train_loader, loss_function, model, optimizer, grad_clipping, max_norm
     
     if scheduler:
         scheduler.step()
+        
+    # Step 5: update the variables for score
+    if scoring == 'r2':
+        preds = torch.cat((preds, output))
+        y_true = torch.cat((y_true, targets))
+    else:
+        y_pred_labels = torch.argmax(output, dim = 1)
+        tp = torch.sum((y_pred_labels == targets) & (y_pred_labels==1))
+        tn = torch.sum((y_pred_labels == targets) & (y_pred_labels==0))
+        fp = torch.sum((y_pred_labels != targets) & (y_pred_labels==1))
+        fn = torch.sum((y_pred_labels != targets) & (y_pred_labels==0))
+        running_train_tp += tp
+        running_train_tn += tn
+        running_train_fp += fp
+        running_train_fn += fn
           
     # Add train loss of a batch 
     running_train_loss += loss.item()
-
-    # Add Corect counts of a batch
-    running_train_correct += correct
-
-
+    
   
   # Calculate mean train loss for the whole dataset for a particular epoch
   train_loss = running_train_loss/len(train_loader)
 
   # Calculate accuracy for the whole dataset for a particular epoch
-  train_acc = running_train_correct/len(train_loader.dataset)
+  if scoring == 'r2':
+      train_score = r2_score(preds, y_true)
+  elif scoring == 'accuracy':
+      train_score = (running_train_tp+running_train_tn)/len(train_loader.dataset)
+  elif scoring == 'recall':
+      train_score = running_train_tp / (running_train_tp + running_train_fn)
+  elif scoring == 'precision':
+      train_score = running_train_tp / (running_train_tp + running_train_fp)
+  elif scoring == 'f1':
+      train_score = running_train_tp / (running_train_tp + 1/2*(running_train_fp + running_train_fn))
+  else:
+      raise ValueError("Please use 'r2', 'accuracy', 'precision', 'recall', or 'f1' for scoring.")
   
 
-  return train_loss, train_acc
+  return train_loss, train_score
 
 
-def validate(valid_loader, loss_function, model, device):
+def validate(valid_loader, 
+             loss_function, 
+             model, 
+             device, 
+             scoring='r2'):
 
   # initilalize variables as global
   # these counts will be updated every epoch
 
   # Validation/Test loop
-  # Initialize valid_loss at the he strat of the epoch
-  running_val_loss = 0
-  running_val_correct = 0
-
+  # Initialize valid_loss at the start of the epoch
+  if scoring == 'r2':
+      preds = torch.Tensor() 
+      preds = preds.to(device)
+      y_true = torch.Tensor()
+      y_true = y_true.to(device)
+  else:
+      running_val_loss = 0
+      running_val_tp = 0
+      running_val_tn = 0
+      running_val_fp = 0
+      running_val_fn = 0
   # put the model in evaluation mode
   model.eval()
 
@@ -120,31 +169,46 @@ def validate(valid_loader, loss_function, model, device):
       targets = targets.long()
       loss = loss_function(output, targets)
 
-      # Correct Predictions
-      y_pred = torch.argmax(output, dim = 1)
-      correct = torch.sum(y_pred == targets)
-
       # Add val loss of a batch 
       running_val_loss += loss.item()
 
       # Add correct count for each batch
-      running_val_correct += correct
-
+      if scoring == 'r2':
+          preds = torch.cat((preds, output))
+          y_true = torch.cat((y_true, targets))
+      else:
+          y_pred_labels = torch.argmax(output, dim = 1)
+          tp = torch.sum((y_pred_labels == targets) & (y_pred_labels==1))
+          tn = torch.sum((y_pred_labels == targets) & (y_pred_labels==0))
+          fp = torch.sum((y_pred_labels != targets) & (y_pred_labels==1))
+          fn = torch.sum((y_pred_labels != targets) & (y_pred_labels==0))
+          running_val_tp += tp
+          running_val_tn += tn
+          running_val_fp += fp
+          running_val_fn += fn
 
     # Calculate mean val loss for the whole dataset for a particular epoch
     val_loss = running_val_loss/len(valid_loader)
 
     # Calculate accuracy for the whole dataset for a particular epoch
-    val_acc = running_val_correct/len(valid_loader.dataset)
+    if scoring == 'r2':
+        val_score = r2_score(preds, y_true)
+    elif scoring == 'accuracy':
+        val_score = (running_val_tp+running_val_tn)/len(valid_loader.dataset)
+    elif scoring == 'recall':
+        val_score = running_val_tp / (running_val_tp + running_val_fn)
+    elif scoring == 'precision':
+        val_score = running_val_tp / (running_val_tp + running_val_fp)
+    elif scoring == 'f1':
+        val_score = running_val_tp / (running_val_tp + 1/2*(running_val_fp + running_val_fn))
+    else:
+        raise ValueError("Please use 'r2', 'accuracy', 'precision', 'recall', or 'f1' for scoring.")
 
-    # scheduler step
-    # scheduler.step(valid_loss)
-    # scheduler.step()
     
-  return val_loss, val_acc
+  return val_loss, val_score
 
 def train_loop(train_loader, valid_loader, model, optimizer, loss_function, epochs, device, patience, early_stopping,
-               file_model, grad_clipping, max_norm, scheduler):
+               file_model, grad_clipping, max_norm, scheduler, scoring='accuracy'):
     
   """ 
   Function for training the model and plotting the graph for train & validation loss vs epoch.
@@ -155,8 +219,8 @@ def train_loop(train_loader, valid_loader, model, optimizer, loss_function, epoc
   # Create lists to store train and val loss at each epoch
   train_loss_history = []
   valid_loss_history = []
-  train_acc_history = []
-  valid_acc_history = []
+  train_score_history = []
+  valid_score_history = []
 
   # initialize variables for early stopping
 
@@ -174,27 +238,29 @@ def train_loop(train_loader, valid_loader, model, optimizer, loss_function, epoc
     t0 = datetime.now()
 
     # Get train loss and accuracy for one epoch
-    train_loss, train_acc = train(train_loader, 
-                                  loss_function, 
-                                  model, 
-                                  optimizer, 
-                                  grad_clipping, 
-                                  max_norm, 
-                                  device,
-                                  scheduler)
-    valid_loss, valid_acc   = validate(valid_loader, 
-                                       loss_function, 
-                                       model, 
-                                       device)
+    train_loss, train_score = train(train_loader, 
+                                    loss_function, 
+                                    model, 
+                                    optimizer, 
+                                    grad_clipping, 
+                                    max_norm, 
+                                    device,
+                                    scheduler,
+                                    scoring)
+    valid_loss, valid_score   = validate(valid_loader, 
+                                         loss_function, 
+                                         model, 
+                                         device,
+                                         scoring)
 
     dt = datetime.now() - t0
 
     # Save history of the Losses and accuracy
     train_loss_history.append(train_loss)
-    train_acc_history.append(train_acc)
+    train_score_history.append(train_score)
 
     valid_loss_history.append(valid_loss)
-    valid_acc_history.append(valid_acc)
+    valid_score_history.append(valid_score)
 
     # Log the train and valid loss to wandb
 
@@ -254,28 +320,186 @@ def train_loop(train_loader, valid_loader, model, optimizer, loss_function, epoc
     print(f'Time to complete {epoch+1} is {dt}')
     if scheduler:
       print(f'Learning rate: {scheduler._last_lr[0]}')
-    print(f'Train Loss: {train_loss : .4f} | Train Accuracy: {train_acc * 100 : .4f}%')
-    print(f'Valid Loss: {valid_loss : .4f} | Valid Accuracy: {valid_acc * 100 : .4f}%')
+    print(f'Train Loss: {train_loss : .4f} | Train {scoring}: {train_score : .4f}')
+    print(f'Valid Loss: {valid_loss : .4f} | Valid {scoring}: {valid_score : .4f}')
     print()
     torch.cuda.empty_cache()
 
-  return train_loss_history, train_acc_history, valid_loss_history, valid_acc_history
+  return train_loss_history, train_score_history, valid_loss_history, valid_score_history
 
-def get_acc_pred(data_loader, model, device):
+# def get_acc_pred(data_loader, model, device):
+    
+#   """ 
+#   Function to get predictions and accuracy for a given data using estimated model
+#   Input: Data iterator, Final estimated weoights, bias
+#   Output: Prections and Accuracy for given dataset
+#   """
+
+#   # Array to store predicted labels
+#   predictions = torch.Tensor() # empty tensor
+#   predictions = predictions.to(device) # move predictions to GPU
+
+#   # Array to store actual labels
+#   y = torch.Tensor() # empty tensor
+#   y = y.to(device)
+
+#   # put the model in evaluation mode
+#   model.eval()
+  
+#   # Iterate over batches from data iterator
+#   with torch.no_grad():
+#     for input_, targets in data_loader:
+      
+#       # move inputs and outputs to GPUs
+      
+#       input_ = input_.to(device)
+#       targets = targets.to(device)
+      
+#       # Calculated the predicted labels
+#       output = model(input_)
+
+#       # Choose the label with maximum probability
+#       prediction = torch.argmax(output, dim = 1)
+
+#       # Add the predicted labels to the array
+#       predictions = torch.cat((predictions, prediction)) 
+
+#       # Add the actual labels to the array
+#       y = torch.cat((y, targets)) 
+
+#   # Check for complete dataset if actual and predicted labels are same or not
+#   # Calculate accuracy
+#   acc = (predictions == y).float().mean()
+
+#   # Return tuple containing predictions and accuracy
+#   return predictions, acc 
+
+# def get_pred_prob(data_loader, model, device):
+    
+#   """ 
+#   Function to get predictions and accuracy for a given data using estimated model
+#   Input: Data iterator, Final estimated weoights, bias
+#   Output: Prections and Accuracy for given dataset
+#   """
+
+#   # Array to store predicted labels
+#   predictions = torch.Tensor() # empty tensor
+#   predictions = predictions.to(device) # move predictions to GPU
+
+#   # Array to store actual labels
+#   #y = torch.Tensor() # empty tensor
+#   #y = y.to(device)
+
+#   # put the model in evaluation mode
+#   model.eval()
+  
+#   # Iterate over batches from data iterator
+#   with torch.no_grad():
+#     for input_, targets in data_loader:
+      
+#       # move inputs and outputs to GPUs
+      
+#       input_ = input_.to(device)
+#       #targets = targets.to(device)
+      
+#       # Calculated the predicted labels
+#       output = model(input_)
+
+#       # Choose the label with maximum probability
+#       prediction = output[:,1]
+#       #prediction = torch.argmax(output, dim = 1)
+
+#       # Add the predicted labels to the array
+#       predictions = torch.cat((predictions, prediction)) 
+
+#       # Add the actual labels to the array
+#       #y = torch.cat((y, targets)) 
+
+#   # Check for complete dataset if actual and predicted labels are same or not
+#   # Calculate accuracy
+#   #acc = (predictions == y).float().mean()
+
+#   # Return tuple containing predictions and accuracy
+#   return predictions
+
+# def get_pred(data_loader, model, device):
+    
+#   """ 
+#   Function to get predictions and accuracy for a given data using estimated model
+#   Input: Data iterator, Final estimated weoights, bias
+#   Output: Prections and Accuracy for given dataset
+#   """
+
+#   # Array to store predicted labels
+#   predictions = torch.Tensor() # empty tensor
+#   predictions = predictions.to(device) # move predictions to GPU
+
+#   # Array to store actual labels
+#   #y = torch.Tensor() # empty tensor
+#   #y = y.to(device)
+
+#   # put the model in evaluation mode
+#   model.eval()
+  
+#   # Iterate over batches from data iterator
+#   with torch.no_grad():
+#     for input_, targets in data_loader:
+      
+#       # move inputs and outputs to GPUs
+      
+#       input_ = input_.to(device)
+#       #targets = targets.to(device)
+      
+#       # Calculated the predicted labels
+#       output = model(input_)
+
+#       # Choose the label with maximum probability
+#       #prediction = output[:,0]
+#       prediction = torch.argmax(output, dim = 1)
+
+#       # Add the predicted labels to the array
+#       predictions = torch.cat((predictions, prediction)) 
+
+#       # Add the actual labels to the array
+#       #y = torch.cat((y, targets)) 
+
+#   # Check for complete dataset if actual and predicted labels are same or not
+#   # Calculate accuracy
+#   #acc = (predictions == y).float().mean()
+
+#   # Return tuple containing predictions and accuracy
+#   return predictions
+
+
+def get_pred(data_loader, 
+             model, 
+             device,  
+             return_ytrue=False,
+             return_proba=False,
+             ):
     
   """ 
-  Function to get predictions and accuracy for a given data using estimated model
-  Input: Data iterator, Final estimated weoights, bias
-  Output: Prections and Accuracy for given dataset
+  Function to get prediction or true y a given data using estimated model
+  Input: data_loader: Data iterator
+         model: trained model
+         device: device for model to load on
+         return_ytrue: return true y or not
+         return_proba: for regression, always setting to True
+                       for classification, True for getting the probability; 
+                           False for getting the labels 
+  Output: Prections (,y_true(optional))
   """
 
   # Array to store predicted labels
-  predictions = torch.Tensor() # empty tensor
-  predictions = predictions.to(device) # move predictions to GPU
+  preds = torch.Tensor() # empty tensor
+  preds = preds.to(device) # move predictions to GPU
 
-  # Array to store actual labels
-  y = torch.Tensor() # empty tensor
-  y = y.to(device)
+  # Array to store actual labels and predicted probability
+  if return_ytrue:
+      y_true = torch.Tensor()
+      y_true = y_true.to(device)
+  else:
+      y_true = None
 
   # put the model in evaluation mode
   model.eval()
@@ -293,113 +517,14 @@ def get_acc_pred(data_loader, model, device):
       output = model(input_)
 
       # Choose the label with maximum probability
-      prediction = torch.argmax(output, dim = 1)
-
-      # Add the predicted labels to the array
-      predictions = torch.cat((predictions, prediction)) 
-
-      # Add the actual labels to the array
-      y = torch.cat((y, targets)) 
-
-  # Check for complete dataset if actual and predicted labels are same or not
-  # Calculate accuracy
-  acc = (predictions == y).float().mean()
-
-  # Return tuple containing predictions and accuracy
-  return predictions, acc 
-
-def get_pred_prob(data_loader, model, device):
-    
-  """ 
-  Function to get predictions and accuracy for a given data using estimated model
-  Input: Data iterator, Final estimated weoights, bias
-  Output: Prections and Accuracy for given dataset
-  """
-
-  # Array to store predicted labels
-  predictions = torch.Tensor() # empty tensor
-  predictions = predictions.to(device) # move predictions to GPU
-
-  # Array to store actual labels
-  #y = torch.Tensor() # empty tensor
-  #y = y.to(device)
-
-  # put the model in evaluation mode
-  model.eval()
-  
-  # Iterate over batches from data iterator
-  with torch.no_grad():
-    for input_, targets in data_loader:
-      
-      # move inputs and outputs to GPUs
-      
-      input_ = input_.to(device)
-      #targets = targets.to(device)
-      
-      # Calculated the predicted labels
-      output = model(input_)
-
-      # Choose the label with maximum probability
-      prediction = output[:,1]
-      #prediction = torch.argmax(output, dim = 1)
-
-      # Add the predicted labels to the array
-      predictions = torch.cat((predictions, prediction)) 
-
-      # Add the actual labels to the array
-      #y = torch.cat((y, targets)) 
-
-  # Check for complete dataset if actual and predicted labels are same or not
-  # Calculate accuracy
-  #acc = (predictions == y).float().mean()
-
-  # Return tuple containing predictions and accuracy
-  return predictions
-
-def get_pred(data_loader, model, device):
-    
-  """ 
-  Function to get predictions and accuracy for a given data using estimated model
-  Input: Data iterator, Final estimated weoights, bias
-  Output: Prections and Accuracy for given dataset
-  """
-
-  # Array to store predicted labels
-  predictions = torch.Tensor() # empty tensor
-  predictions = predictions.to(device) # move predictions to GPU
-
-  # Array to store actual labels
-  #y = torch.Tensor() # empty tensor
-  #y = y.to(device)
-
-  # put the model in evaluation mode
-  model.eval()
-  
-  # Iterate over batches from data iterator
-  with torch.no_grad():
-    for input_, targets in data_loader:
-      
-      # move inputs and outputs to GPUs
-      
-      input_ = input_.to(device)
-      #targets = targets.to(device)
-      
-      # Calculated the predicted labels
-      output = model(input_)
-
-      # Choose the label with maximum probability
       #prediction = output[:,0]
-      prediction = torch.argmax(output, dim = 1)
+      if not return_proba:
+          output = torch.argmax(output, dim = 1)
 
       # Add the predicted labels to the array
-      predictions = torch.cat((predictions, prediction)) 
+      preds = torch.cat((preds, output))
 
-      # Add the actual labels to the array
-      #y = torch.cat((y, targets)) 
-
-  # Check for complete dataset if actual and predicted labels are same or not
-  # Calculate accuracy
-  #acc = (predictions == y).float().mean()
-
-  # Return tuple containing predictions and accuracy
-  return predictions
+      if return_ytrue:
+          y_true = torch.cat((y_true, targets))
+  
+  return preds, y_true
